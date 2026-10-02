@@ -1,14 +1,223 @@
-# astrbot-plugin-helloworld
+# 娜娜群管 · astrbot_plugin_nana
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AstrBot 群管风控插件，提供**入群申请审核**与**入群后算术验证**两段式验证，全部参数可在 WebUI 内自助调节。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+- 入群申请：对申请附言做正则匹配，可选交给大模型结合 QQ 等级与留言判断是真实玩家还是广告人机；不通过则**自动审批拒绝**并**自动回复**申请人。
+- 入群之后：发送限时加减法，成员需在**规定时间与次数**内答对；否则按配置执行 **禁言 / 踢出 / 二次验证**（禁言并在另一个群通知管理员处理）。
 
-# Supports
+> 仅支持 **aiocqhttp（OneBot V11）** 平台，如 NapCat、LLOneBot。
+> 机器人需要具备**群管理员权限**才能禁言、踢人、审批入群申请。
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+---
+
+## 一、入群申请验证
+
+触发事件：OneBot `request.group.add`（有人申请加群）。
+
+```
+有人申请加群
+    ↓
+读取附言 / QQ 等级
+    ↓
+低等级直接拒绝？（reject_level_below）
+    ↓
+用 answer_pattern 正则全匹配附言
+    ↓
+┌─ 匹配成功 ─────────────────────────────┐
+│   放行（不做任何审批动作，可交给其他插件/机器人审批） │
+└───────────────────────────────────────┘
+    ↓ 不匹配
+启用 AI 判定？（use_llm + llm_mode）
+    ├─ 否 → 直接拒绝
+    └─ 是 → 把「昵称 + 等级 + 附言」交给大模型
+              ├─ PASS   → 放行
+              ├─ REJECT → 拒绝
+              └─ 超时/报错/无法识别 → 按 llm_fallback 处理
+    ↓ 判定为拒绝
+自动调用 set_group_add_request(approve=false, reason=reject_reason)
+    ↓
+按 reject_reply 模板自动回复申请人（优先私聊）
+```
+
+### 关键配置
+
+| 配置项 | 说明 |
+| --- | --- |
+| `answer_pattern` | 答案正则，默认 `\w+\s*#\s*\d+`，对应「游戏名称#数字」如 `娜娜#123`。使用**全匹配**，附言多出任何字符都会判为不通过 |
+| `use_llm` / `llm_mode` | 是否启用 AI 判定及时机：`正则不通过时`（默认，省钱）/ `始终由AI判定` / `仅AI判定`（完全跳过正则） |
+| `llm_prompt` | AI 判定提示词，可用变量 `{user_id} {user_name} {level} {answer} {group_id} {group_name} {comment}`，要求模型只输出 `PASS` 或 `REJECT` |
+| `llm_fallback` | 模型超时/报错/输出无法识别时：`按正则结果处理` / `拒绝` / `放行` |
+| `reject_reason` | 回传给申请人的拒绝理由（会显示在 QQ 的加群失败提示中） |
+| `reject_reply` | 拒绝后自动回复内容，变量 `{user_name} {user_id} {reason} {group_id} {answer}` |
+| `reject_blacklist` | 拒绝并拉黑；适配器不支持该字段时自动降级为普通拒绝 |
+| `reject_level_below` | 例如填 `8`，等级低于 8 直接拒绝且不消耗 AI 调用；`0` 表示不限制 |
+
+> **关于「自动回复」的说明**：机器人无法向尚未入群的陌生人发送群消息。本插件通过 `set_group_add_request` 的 `reason` 把拒绝理由回传（QQ 客户端会展示），并在开启 `reject_private` 时额外尝试私聊发送 `reject_reply`。多数平台会拦截陌生私聊，此时回复内容会写入日志，而拒绝动作本身始终生效。
+
+---
+
+## 二、入群后算术验证
+
+触发事件：OneBot `notice.group_increase`（有人入群）。
+
+```
+新成员入群
+    ↓
+是群主/管理员？（skip_admins）→ 跳过
+    ↓
+延迟 join_delay 秒后出题
+    ↓
+第 1 题：10 以内加减法（difficulty）
+    ↓
+等待 verify_timeout 秒
+    ↓
+┌─ 答对 ──────────────→ 发送 success_reply，验证通过
+│
+├─ 发非数字 ───────────→ 提示 non_number_reply
+│                        （count_non_number 决定是否消耗次数）
+│
+└─ 答错 / 超时 ────────→ 消耗 1 次机会
+        ├─ 还有剩余次数 → 发送 wrong_reply / timeout_reply，并附上下一题
+        └─ 次数用尽     → 进入「验证失败处理」
+```
+
+### 失败处理（三选一）
+
+| `action` | 行为 |
+| --- | --- |
+| **禁言** | 在群内禁言 `mute_seconds` 秒，并发送 `mute_reply` |
+| **踢出** | 发送 `kick_reply` 后调用 `set_group_kick` 移出群聊（`kick_blacklist` 可一并拉黑） |
+| **二次验证** | 先禁言 `mute_seconds` 秒，再把提醒发送到**通知群**，等待管理员在通知群处理 |
+
+二次验证的提醒内容由全局 `notify_group_template` 控制，默认包含：
+
+```
+qq:{user_id} 回答错误，注意处理
+群号：{group_id}
+昵称：{user_name}
+题目：{question}   回答：{answer}   原因：{reason}
+本群执行情况：{action_note}
+（机器人角色：{bot_role}）
+/通过验证 {user_id}   ← 解除禁言
+/拒绝验证 {user_id}   ← 移出群聊
+```
+
+- `notify_group`：通知群号；未配置或发送失败且开启 `notify_owner_admin` 时，退化为**私聊原群的群主与管理员**。
+- `action_note`：**原群禁言/踢出到底有没有真的执行**。例如 `✅ 已禁言 600 秒`、
+  `❌ 机器人非本群管理员，禁言/踢出未执行，请手动处理`、`⚠️ 无法确认机器人权限，请人工核对本群处理结果`。
+- `secondary_notify_errors_only`：开启后仅「答错」通知，超时未作答不打扰管理员。
+- `admin_decision_timeout`：管理员处理时限，超时后按 `decision_timeout_action` 兜底（`保持禁言` / `踢出` / `解除禁言`）；填 `0` 表示不设超时。
+
+### 机器人权限依赖（重要）
+
+跨群转发只需要机器人是**通知群成员**即可完成，但原群的动作执行需要机器人在**原群是管理员**：
+
+| 动作 | 需要的接口 | 机器人非原群管理员时 |
+| --- | --- | --- |
+| 收到入群事件、发送验证题与失败提示 | 被动接收 + `send_group_msg` | ✅ 正常 |
+| **转发提醒到通知群** | `send_group_msg(通知群)` | ✅ **正常**（跨群转发不受影响） |
+| 原群禁言 | `set_group_ban` | ❌ 平台拒绝 |
+| 原群踢出 | `set_group_kick` | ❌ 平台拒绝 |
+| 通知群里 `/通过验证` 解除原群禁言 | `set_group_ban(duration=0)` | ❌ 平台拒绝 |
+| 通知群里 `/拒绝验证` 移出原群成员 | `set_group_kick` | ❌ 平台拒绝 |
+| 入群申请自动审批拒绝 | `set_group_add_request` | ❌ 平台拒绝 |
+
+**机器人没有管理员权限时不会静默失败**，而是如实报告：
+
+- 通知群消息里的 `{action_note}` 会写明「机器人非本群管理员，禁言/踢出未执行，请手动处理」。
+- 原群消息不再谎称「已被禁言」，改为「⚠️ 机器人无权限禁言，已提交管理员处理」。
+- `/通过验证`、`/拒绝验证` 的回复会区分「已成功」与「已标记但执行失败，请检查机器人权限」。
+- 管理员处理超时兜底时，若机器人无权限也会明确说明无法执行。
+- `/群管状态` 会直接显示机器人当前在该群的角色，非管理员时附带警告。
+
+---
+
+## 三、管理员指令
+
+| 指令 | 说明 | 权限 |
+| --- | --- | --- |
+| `/通过验证 <@成员或QQ号>` | 解除二次验证成员的禁言 | 群主 / 群管理员 / 通知群管理员 / AstrBot 管理员 |
+| `/拒绝验证 <@成员或QQ号>` | 拒绝二次验证成员并移出群聊 | 同上 |
+| `/解除禁言 <@成员或QQ号>` | 手动解除指定成员的禁言 | 同上 |
+| `/群管状态` | 查看本群当前生效的验证配置与待处理记录 | 群内任何人 |
+
+> 通知群的群主/管理员可以直接在通知群里回复 `qq:xxxxxxx` 对应的处理指令，无需切回原群。
+
+---
+
+## 四、配置结构
+
+配置分五大区块，均可在 WebUI 插件配置页修改：
+
+1. **全局设置** — 总开关、通知群号与通知模板、AI 模型选择。
+2. **群自定义配置** — 以 `template_list` 形式为指定群覆盖全局默认；`跟随全局默认` 打开时忽略该群下方的所有覆盖项。
+3. **入群申请验证（全局默认）** — 见上文「关键配置」。
+4. **入群后算术验证（全局默认）** — 时限、次数、难度、题面与各种回复文案。
+5. **验证失败处理（全局默认）** — 处理方式、禁言时长、通知群与超时兜底。
+
+### 题目难度
+
+| 难度 | 范围 | 示例 |
+| --- | --- | --- |
+| 简单（10以内加减） | 默认。关闭负数后两加数与结果都在 0-10 内 | `3 + 4`、`9 - 2` |
+| 中等（100以内加减） | 10-99 的加减法 | `58 + 27`、`91 - 43` |
+| 较难（两位数混合） | 同上，且允许出现较大结果 | `76 + 88` |
+
+`allow_subtract_negative` 控制减法是否可能得到负数答案。
+
+---
+
+## 五、安装
+
+1. 把插件目录放到 AstrBot 的插件目录：
+
+```bash
+cd AstrBot/data/plugins
+# 目录名必须为 astrbot_plugin_nana
+```
+
+2. 在 WebUI「插件管理」中点击**重载插件**，或重启 AstrBot。
+3. 进入插件配置页按需调整参数并保存（保存后建议重载一次插件使状态文件路径生效）。
+
+---
+
+## 六、目录结构
+
+```
+astrbot_plugin_nana/
+├── main.py                 # 插件实现
+├── _conf_schema.json       # WebUI 配置 schema（全部可调参数）
+├── metadata.yaml           # 插件元信息
+├── tools/harness.py        # 使用桩件驱动全流程的集成自测脚本
+└── README.md
+```
+
+插件运行状态保存在 `data/plugin_data/astrbot_plugin_nana/pending_verifications.json`，
+仅用于插件重载后恢复尚未处理完的二次验证记录，可随时删除。
+
+---
+
+## 七、自测
+
+`tools/harness.py` 用桩件替换 AstrBot 运行时，直接驱动 OneBot 事件覆盖全部流程，无需真实机器人：
+
+```bash
+python tools/harness.py
+```
+
+覆盖入群申请正则/AI 判定与拒绝回复、算术验证通过/答错/超时/非数字、
+三种失败处理、跨群通知、管理员指令鉴权、群覆盖配置、状态持久化、接口异常，
+以及**机器人非管理员**时的跨群转发与如实报错等 83 项断言。
+
+---
+
+## 八、注意事项
+
+- 机器人必须是群管理员，否则禁言、踢人、审批入群申请都会失败；插件会如实报告失败而不是静默忽略（详见「机器人权限依赖」）。跨群转发本身不需要管理员权限。
+- 成员在等待期间退群时，失败处理会自动跳过。
+- 通过 `/群管状态` 可以快速确认某个群实际生效的是全局默认还是群覆盖配置，以及机器人在该群的角色。
+- 本插件不依赖额外第三方库。
+
+## 许可证
+
+MIT License

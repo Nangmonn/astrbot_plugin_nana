@@ -1,6 +1,11 @@
-name: helloworld # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: helloworld # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: AstrBot 插件示例。 # 插件简短描述
-version: v1.3.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Soulter # 作者
-repo: https://github.com/Soulter/helloworld # 插件的仓库地址
+name: astrbot_plugin_nana
+display_name: 娜娜群管
+desc: 群管验证插件：入群申请自动正则/AI 审核并审批拒绝，入群后限时算术验证，支持禁言/踢出/二次验证
+short_desc: 入群申请正则+AI 审核、入群算术验证、禁言踢出二次验证
+version: v1.2.0
+author: Nanmo
+repo: https://github.com/Nangmonn/astrbot_plugin_nana
+category: 群管
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.0.0"
