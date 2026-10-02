@@ -1,0 +1,11 @@
+name: astrbot_plugin_nana
+display_name: 娜娜群管
+desc: 群管验证插件：入群申请自动正则/AI 审核并审批拒绝，入群后限时算术验证，支持禁言/踢出/二次验证
+short_desc: 入群申请正则+AI 审核、入群算术验证、禁言踢出二次验证
+version: v1.2.0
+author: Nanmo
+repo: https://github.com/Nangmonn/astrbot_plugin_nana
+category: 群管
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.0.0"
